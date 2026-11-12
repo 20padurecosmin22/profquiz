@@ -1,4 +1,4 @@
-import { supabaseServer } from '@/lib/supabase/server';
+import { supabaseAdmin } from '@/lib/supabase/server';
 
 const TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
 
@@ -9,8 +9,9 @@ export async function GET(_request, { params }) {
   const ext = valid ? parts[2].split('.').pop().toLowerCase() : '';
   if (!valid || !TYPES[ext]) return new Response('Not found', { status: 404 });
 
-  const supabase = await supabaseServer();
-  const { data, error } = await supabase.storage.from('quiz-images').download(parts.join('/'));
+  const admin = supabaseAdmin();
+  if (!admin) return new Response('Not found', { status: 404 });
+  const { data, error } = await admin.storage.from('quiz-images').download(parts.join('/'));
   if (error || !data) return new Response('Not found', { status: 404 });
 
   return new Response(data.stream(), {

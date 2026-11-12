@@ -1,6 +1,7 @@
 'use server';
 
 import { supabaseServer } from '@/lib/supabase/server';
+import { allow } from '@/lib/ratelimit';
 import { SUBJECTS, GRADES, TIME_CHOICES, MAX_OPTIONS } from '@/lib/questions';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -47,6 +48,7 @@ function cleanQuestion(q, position, quizId, userId) {
 export async function createQuiz() {
   const { supabase, user } = await requireUser();
   if (!user) return { ok: false, error: 'Sesiunea a expirat. Autentificați-vă din nou.' };
+  if (!(await allow(`quiz-user:${user.id}`, 60, 3600))) return { ok: false, error: 'Prea multe teste create într-o oră.' };
   const { data, error } = await supabase.from('quizzes').insert({ owner_id: user.id, title: 'Test fără titlu' }).select('id').single();
   return error ? { ok: false, error: 'Testul nu a putut fi creat.' } : { ok: true, id: data.id };
 }
@@ -102,6 +104,7 @@ export async function saveQuiz({ quiz, questions, deletedIds }) {
 export async function uploadImage(formData) {
   const { supabase, user } = await requireUser();
   if (!user) return { ok: false, error: 'Sesiunea a expirat.' };
+  if (!(await allow(`upload-user:${user.id}`, 60, 600))) return { ok: false, error: 'Prea multe imagini încărcate într-un timp scurt.' };
   const file = formData.get('file');
   const quizId = String(formData.get('quizId') || '');
   if (!UUID.test(quizId)) return { ok: false, error: 'Test invalid.' };

@@ -31,18 +31,24 @@ Stilul vizual urmează `TJA_design_system.json` (navy, violet #8057F4, motiv geo
 
 ## Securitate
 
-- Cheile Supabase stau doar în variabilele de mediu ale serverului (Vercel), fără prefixul `NEXT_PUBLIC_`, deci nu ajung în codul trimis browserului.
-- Conturile, testele, imaginile, rapoartele și biblioteca trec prin Server Actions și rute de server; browserul nu comunică direct cu baza de date.
-- Cookie-urile de sesiune sunt `httpOnly`, `secure` și `sameSite=lax`.
-- Imaginile sunt într-un bucket privat și se servesc prin `/media/...` de pe domeniul aplicației.
-- Doar paginile jocului live (`/live`, `/joc`) primesc de la server configurația pentru Supabase Realtime, necesară legăturii instantanee tablă-telefoane.
-- Toate tabelele au RLS; datele primite de server sunt validate înainte de scriere.
+- Cheile Supabase stau doar în variabilele de mediu ale serverului (Vercel), fără prefixul `NEXT_PUBLIC_`.
+- Conturile, testele, imaginile, rapoartele și biblioteca trec prin Server Actions; browserul nu comunică direct cu baza de date.
+- Cookie-uri de sesiune `httpOnly`, `secure`, `sameSite=lax`; antete CSP, HSTS, X-Frame-Options, COOP.
+- Limitarea încercărilor pentru autentificare, înregistrare, resetarea parolei, căutarea PIN-ului, crearea de teste, jocuri și imagini.
+- Parole de cel puțin 10 caractere, cu litere și cifre; redirecționările după autentificare acceptă doar căi interne.
+- Imaginile sunt într-un bucket privat, fără listare, servite prin `/media/...` cu cheia secretă, doar pe server.
+- Jocul live: tabla semnează fiecare mesaj (ECDSA P-256), iar telefoanele îl verifică cu cheia publică primită de la server;
+  răspunsurile elevilor sunt criptate și autentificate (ECDH P-256 + AES-GCM), deci nu pot fi citite sau falsificate de alți elevi.
+  Intrarea în joc poate fi blocată, iar numărul de jucători este limitat.
+- RLS pe toate tabelele, drepturi pe coloane (contoarele și cheile jocului nu pot fi modificate de utilizatori),
+  constrângeri de lungime; funcțiile pentru PIN și limitare pot fi apelate doar de server.
 
 ## Variabile de mediu (Vercel)
 
 ```
 SUPABASE_URL=https://<proiect>.supabase.co
 SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
 ```
 
 ## Rulare locală

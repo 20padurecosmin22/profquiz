@@ -6,12 +6,15 @@ import QRCode from 'qrcode';
 import { realtime, joinTopic, postTo, topics } from '@/lib/room';
 import { createSession, markSession, saveRound, finishSession } from '@/app/actions/games';
 import { mediaUrl } from '@/lib/media';
+import { createHostKeys, signMessage, sharedKey, unseal, validJwk, sameJwk } from '@/lib/gamecrypto';
 import { TYPES, isCorrect, pointsFor, normalizeText, shuffle, POINTS } from '@/lib/questions';
 import { OPTION_STYLES, Shape } from '@/components/Shape';
 import { LogoMark } from '@/components/Logo';
 import { Icon } from '@/components/Icons';
 
 const INTRO_SECONDS = 4;
+const MAX_PLAYERS = 250;
+const ID_RE = /^[a-z0-9]{6,24}$/;
 
 function newPin() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -54,6 +57,8 @@ export default function Board({ quiz, questions, skipped, isOwner, rt }) {
   const upRoom = useRef(null);
   const timer = useRef(null);
   const persistChain = useRef(Promise.resolve());
+  const sendQueue = useRef(Promise.resolve());
+  const keysRef = useRef(null);
   const [, render] = useReducer((x) => x + 1, 0);
   const [qr, setQr] = useState('');
   const [origin, setOrigin] = useState('');
@@ -132,8 +137,22 @@ export default function Board({ quiz, questions, skipped, isOwner, rt }) {
     });
   }
 
+  function signed(payload) {
+    const s = G.current;
+    return signMessage(s.keys.signKey, { ...payload, sid: s.sessionId });
+  }
+
   function broadcast(payload) {
-    if (room.current) room.current.send('state', payload);
+    const s = G.current;
+    const r = room.current;
+    if (!r || !s) return;
+    sendQueue.current = sendQueue.current.then(async () => { r.send('state', await signed(payload)); }).catch(() => {});
+  }
+
+  function sendTo(id, event, payload) {
+    const s = G.current;
+    if (!s) return;
+    sendQueue.current = sendQueue.current.then(async () => { await postTo(realtime(rt), topics.me(s.pin, id), event, await signed({ ...payload, to: id })); }).catch(() => {});
   }
 
   function snapshotFor(id) {
@@ -152,39 +171,65 @@ export default function Board({ quiz, questions, skipped, isOwner, rt }) {
     return base;
   }
 
-  function onJoin({ id, name }) {
+  async function onJoin(msg) {
     const s = G.current;
-    if (!s || !id || s.phase === 'podium') return;
+    const id = msg && msg.id;
+    if (!s || typeof id !== 'string' || !ID_RE.test(id) || !validJwk(msg.pub) || s.phase === 'podium') return;
     if (s.kicked.has(id)) return;
-    let clean = String(name || '').replace(/\s+/g, ' ').trim().slice(0, 24) || 'Fără nume';
-    if (!s.players[id]) {
+    const existing = s.players[id];
+    if (existing) {
+      if (!sameJwk(existing.pub, msg.pub)) return;
+    } else {
+      if (s.locked || s.order.length >= MAX_PLAYERS || s.pending.has(id)) return;
+      s.pending.add(id);
+      let key;
+      try {
+        key = await sharedKey(s.keys.dhKey, msg.pub);
+      } catch {
+        s.pending.delete(id);
+        return;
+      }
+      s.pending.delete(id);
+      if (G.current !== s || s.players[id] || s.locked || s.order.length >= MAX_PLAYERS) return;
+      const clean = String(msg.name || '').replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 24) || 'Fără nume';
       const taken = Object.values(s.players).map((p) => p.name.toLowerCase());
       let n = clean, k = 2;
       while (taken.includes(n.toLowerCase())) n = `${clean} ${k++}`;
-      s.players[id] = { id, name: n, score: 0, streak: 0, correctCount: 0, answeredCount: 0 };
+      s.players[id] = { id, name: n, pub: msg.pub, key, score: 0, streak: 0, correctCount: 0, answeredCount: 0 };
       s.order.push(id);
     }
-    postTo(realtime(rt), topics.me(s.pin, id), 'welcome', { id, name: s.players[id].name, snapshot: snapshotFor(id) });
+    sendTo(id, 'welcome', { id, name: s.players[id].name, snapshot: snapshotFor(id) });
     render();
   }
 
-  function onAnswer({ id, qIndex, answer }) {
+  async function onAnswer(msg) {
     const s = G.current;
-    if (!s || s.phase !== 'question' || qIndex !== s.qIndex) return;
-    if (!s.players[id] || s.answers[id]) return;
+    const at = Date.now();
+    if (!s || s.phase !== 'question' || !msg || typeof msg.id !== 'string') return;
+    const p = s.players[msg.id];
+    if (!p || s.answers[msg.id]) return;
+    const data = await unseal(p.key, msg.box);
+    if (!data || G.current !== s || s.phase !== 'question' || data.qIndex !== s.qIndex || s.answers[msg.id]) return;
     const q = s.questions[s.qIndex];
-    const value = validAnswer(q, answer);
+    const value = validAnswer(q, data.answer);
     if (!value) return;
-    s.answers[id] = { value, elapsed: (Date.now() - s.qStart) / 1000 };
+    s.answers[msg.id] = { value, elapsed: Math.max(0, (at - s.qStart) / 1000) };
     render();
     if (Object.keys(s.answers).length >= s.order.length) endQuestion();
+  }
+
+  function toggleLock() {
+    const s = G.current;
+    if (!s) return;
+    s.locked = !s.locked;
+    render();
   }
 
   function kick(id) {
     const s = G.current;
     if (!s || !s.players[id]) return;
     if (!confirm(`Eliminați jucătorul „${s.players[id].name}” din joc?`)) return;
-    postTo(realtime(rt), topics.me(s.pin, id), 'kicked', {});
+    sendTo(id, 'kicked', {});
     s.kicked.add(id);
     delete s.players[id];
     s.order = s.order.filter((x) => x !== id);
@@ -196,13 +241,16 @@ export default function Board({ quiz, questions, skipped, isOwner, rt }) {
     setDbError('');
     let session;
     try {
-      session = await createSession(quiz.id);
+      const keys = await createHostKeys();
+      keysRef.current = keys;
+      session = await createSession(quiz.id, keys.publicKeys);
     } catch {
       session = { ok: false, error: 'Nu ne-am putut conecta la server.' };
     }
     if (!session.ok) { setDbError(session.error); setStarting(false); return; }
     const prepared = session.questions.map((q) => ({ ...q, options: q.options || [], perm: q.type === 'order' ? derange((q.options || []).length) : null }));
     G.current = {
+      keys: keysRef.current, locked: false, pending: new Set(),
       pin: session.pin, sessionId: session.id, title: quiz.title, questions: prepared,
       players: {}, order: [], kicked: new Set(), dbIds: {}, qIndex: -1, phase: 'lobby',
       answers: {}, qStart: 0, timeLeft: 0, lastResults: null, counts: [], textCounts: [],
@@ -352,7 +400,11 @@ export default function Board({ quiz, questions, skipped, isOwner, rt }) {
     if (s && s.phase !== 'podium') {
       persist(() => markSession(s.sessionId, s.qIndex >= 0 ? 'finished' : 'abandoned'));
     }
-    if (room.current) { const r = room.current; r.send('state', { phase: 'closed' }).finally(() => r.close()); room.current = null; }
+    if (room.current && s) {
+      const r = room.current;
+      signMessage(s.keys.signKey, { phase: 'closed', sid: s.sessionId }).then((m) => r.send('state', m)).finally(() => r.close());
+      room.current = null;
+    }
     if (upRoom.current) { upRoom.current.close(); upRoom.current = null; }
     G.current = null;
     setQr('');
@@ -442,6 +494,7 @@ export default function Board({ quiz, questions, skipped, isOwner, rt }) {
               )}
               <div className="foot-actions" style={{ marginTop: 20 }}>
                 <span className="hint">{g.questions.length} întrebări. Puteți elimina un nume nepotrivit cu butonul de lângă el.</span>
+                <button className="btn btn-light" onClick={toggleLock} aria-pressed={!!g.locked}>{g.locked ? 'Deblochează intrarea' : 'Blochează intrarea'}</button>
                 <button className="btn btn-primary btn-lg" disabled={g.order.length === 0} onClick={nextQuestion}>Începe jocul</button>
               </div>
             </div>

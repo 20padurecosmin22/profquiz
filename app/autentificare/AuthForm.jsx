@@ -17,7 +17,8 @@ export default function AuthForm() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(params.get('eroare') ? 'Linkul de confirmare nu mai este valabil. Autentificați-vă sau cereți unul nou.' : '');
   const [info, setInfo] = useState('');
-  const next = params.get('next') && params.get('next').startsWith('/') ? params.get('next') : '/panou';
+  const rawNext = params.get('next') || '';
+  const next = /^\/(?![\/\\])[^\s\\]*$/.test(rawNext) && rawNext.length < 300 ? rawNext : '/panou';
 
   async function submit(e) {
     e.preventDefault();
@@ -83,8 +84,8 @@ export default function AuthForm() {
         {mode !== 'reset' && (
           <div className="field">
             <label htmlFor="pw">Parola</label>
-            <input id="pw" className="input" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} />
-            {mode === 'register' && <p className="help">Cel puțin 8 caractere.</p>}
+            <input id="pw" className="input" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={10} />
+            {mode === 'register' && <p className="help">Cel puțin 10 caractere, cu litere și cifre.</p>}
           </div>
         )}
         {error && <p className="alert alert-bad" role="alert">{error}</p>}

@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { realtime, joinTopic, postTo, postReliable, topics, randomId } from '@/lib/room';
 import { findGame } from '@/app/actions/games';
+import { importVerifyKey, openSigned, loadPlayerKeys, sharedKey, seal } from '@/lib/gamecrypto';
 import { OPTION_STYLES, Shape } from '@/components/Shape';
 import { LogoMark } from '@/components/Logo';
 import { Icon } from '@/components/Icons';
@@ -33,6 +34,10 @@ export default function Player({ rt }) {
   const answeredRef = useRef(-1);
   const joinTimer = useRef(null);
   const tick = useRef(null);
+  const verifyRef = useRef(null);
+  const aesRef = useRef(null);
+  const sidRef = useRef(null);
+  const inbox = useRef(Promise.resolve());
   const stageRef = useRef(stage);
   stageRef.current = stage;
 
@@ -44,7 +49,13 @@ export default function Player({ rt }) {
       if (saved && saved.pin && saved.id && (!p || p === saved.pin)) {
         setName(saved.name || '');
         setPin(saved.pin);
-        connect(saved.pin, saved.name, saved.id);
+        setStage('connecting');
+        findGame(saved.pin)
+          .then((found) => {
+            if (found.ok) connect(saved.pin, saved.name, saved.id, found.keys, saved);
+            else { sessionStorage.removeItem(SAVE_KEY); setStage('join'); }
+          })
+          .catch(() => setStage('join'));
       } else {
         const n = localStorage.getItem('profquiz-name');
         if (n) setName(n);
@@ -122,29 +133,44 @@ export default function Player({ rt }) {
     }
   }
 
-  function connect(p, n, existingId) {
+  function queue(fn) {
+    inbox.current = inbox.current.then(fn).catch(() => {});
+  }
+
+  async function connect(p, n, existingId, hostKeys, saved) {
     setErr('');
-    const id = existingId || randomId();
-    meRef.current = { id, name: n };
-    setMe(meRef.current);
     setStage('connecting');
+    const id = existingId || randomId();
+    let pk;
+    try {
+      verifyRef.current = await importVerifyKey(hostKeys.sign);
+      pk = await loadPlayerKeys(saved && saved.id === id ? saved : null);
+      aesRef.current = await sharedKey(pk.privateKey, hostKeys.dh);
+    } catch {
+      setErr('Browserul nu poate stabili o conexiune sigură. Actualizați browserul și reîncercați.');
+      setStage('join');
+      return;
+    }
+    meRef.current = { id, name: n, pub: pk.pub, priv: pk.priv };
+    setMe(meRef.current);
     pinRef.current = p;
+    sidRef.current = null;
     closeRooms();
     let ready = 0;
     const onStatus = async (status) => {
       if (status === 'SUBSCRIBED') {
         ready += 1;
         if (ready < 2) return;
-        await postTo(realtime(rt), topics.up(p), 'join', { id, name: n });
+        await postTo(realtime(rt), topics.up(p), 'join', { id, name: n, pub: pk.pub });
         clearTimeout(joinTimer.current);
         joinTimer.current = setTimeout(() => {
           if (stageRef.current === 'connecting') {
-            setErr('Tabla jocului nu a răspuns. Verificați PIN-ul și încercați din nou.');
+            setErr('Tabla jocului nu a răspuns. Jocul poate fi blocat pentru intrări noi sau PIN-ul este greșit.');
             setStage('join');
             sessionStorage.removeItem(SAVE_KEY);
             closeRooms();
           }
-        }, 7000);
+        }, 8000);
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
         if (stageRef.current === 'connecting') {
           setErr('Conexiunea a eșuat. Verificați internetul telefonului și încercați din nou.');
@@ -157,25 +183,35 @@ export default function Player({ rt }) {
       sb,
       topics.me(p, id),
       {
-        welcome: (w) => {
-          if (!w || w.id !== meRef.current.id) return;
+        welcome: (msg) => queue(async () => {
+          const w = await openSigned(verifyRef.current, msg);
+          if (!w || w.to !== meRef.current.id || w.id !== meRef.current.id) return;
           clearTimeout(joinTimer.current);
-          meRef.current = { id: w.id, name: w.name };
+          sidRef.current = w.sid;
+          meRef.current = { ...meRef.current, name: w.name };
           setMe(meRef.current);
-          sessionStorage.setItem(SAVE_KEY, JSON.stringify({ pin: p, id: w.id, name: n }));
+          sessionStorage.setItem(SAVE_KEY, JSON.stringify({ pin: p, id, name: n, pub: pk.pub, priv: pk.priv }));
           if (w.snapshot?.phase === 'question') prepareQuestion(w.snapshot.question);
           applyState(w.snapshot);
           if (w.snapshot && w.snapshot.phase === 'lobby') setStage('waiting');
-        },
-        kicked: () => {
+        }),
+        kicked: (msg) => queue(async () => {
+          const k = await openSigned(verifyRef.current, msg);
+          if (!k || k.to !== meRef.current.id) return;
           sessionStorage.removeItem(SAVE_KEY);
           setStage('kicked');
           closeRooms();
-        },
+        }),
       },
       onStatus
     );
-    room.current = joinTopic(sb, topics.down(p), { state: (s) => { if (stageRef.current !== 'connecting') applyState(s); } }, onStatus);
+    room.current = joinTopic(sb, topics.down(p), {
+      state: (msg) => queue(async () => {
+        const st = await openSigned(verifyRef.current, msg);
+        if (!st || stageRef.current === 'connecting' || (sidRef.current && st.sid !== sidRef.current)) return;
+        applyState(st);
+      }),
+    }, onStatus);
   }
 
   function closeRooms() {
@@ -197,10 +233,11 @@ export default function Player({ rt }) {
     } catch {
       found = { ok: false, error: 'network' };
     }
+    if (found.error === 'busy') { setStage('join'); return setErr('Prea multe încercări de pe această rețea. Așteptați un minut.'); }
     if (found.error) { setStage('join'); return setErr('Nu ne-am putut conecta. Verificați internetul și încercați din nou.'); }
     if (!found.ok) { setStage('join'); return setErr('Nu există niciun joc deschis cu acest PIN. Verificați cifrele de pe tablă.'); }
     localStorage.setItem('profquiz-name', n);
-    connect(p, n);
+    connect(p, n, null, found.keys, null);
   }
 
   async function send(answer, shown) {
@@ -210,7 +247,14 @@ export default function Player({ rt }) {
     setMyAnswer(shown);
     setStage('answered');
     if (navigator.vibrate) navigator.vibrate(40);
-    const ok = await postReliable(realtime(rt), topics.up(pinRef.current), 'answer', { id: meRef.current.id, qIndex, answer });
+    let box;
+    try {
+      box = await seal(aesRef.current, { qIndex, answer });
+    } catch {
+      setErr('Răspunsul nu a putut fi pregătit pentru trimitere.');
+      return;
+    }
+    const ok = await postReliable(realtime(rt), topics.up(pinRef.current), 'answer', { id: meRef.current.id, box });
     if (!ok) setErr('Răspunsul nu a putut fi trimis. Verificați conexiunea.');
   }
 

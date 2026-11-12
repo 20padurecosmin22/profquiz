@@ -1,10 +1,12 @@
 'use server';
 
-import { supabaseServer } from '@/lib/supabase/server';
+import { supabaseServer, supabaseAdmin, clientIp } from '@/lib/supabase/server';
+import { allow } from '@/lib/ratelimit';
 import { problemsOf } from '@/lib/questions';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CLIENT = /^[a-z0-9]{6,24}$/;
+const validJwk = (j) => !!j && j.kty === 'EC' && j.crv === 'P-256' && typeof j.x === 'string' && typeof j.y === 'string' && /^[A-Za-z0-9_-]{40,64}$/.test(j.x) && /^[A-Za-z0-9_-]{40,64}$/.test(j.y);
 const int = (v, min, max) => Math.min(max, Math.max(min, Math.round(Number(v) || 0)));
 
 async function requireUser() {
@@ -22,16 +24,26 @@ async function ownSession(supabase, userId, sessionId) {
 export async function findGame(pin) {
   const p = String(pin || '');
   if (!/^[0-9]{6}$/.test(p)) return { ok: false };
-  const supabase = await supabaseServer();
-  const { data, error } = await supabase.rpc('session_by_pin', { p_pin: p });
+  if (!(await allow(`pin-ip:${await clientIp()}`, 120, 60))) return { ok: false, error: 'busy' };
+  const admin = supabaseAdmin();
+  if (!admin) return { ok: false, error: 'network' };
+  const { data, error } = await admin.rpc('session_by_pin', { p_pin: p });
   if (error) return { ok: false, error: 'network' };
-  return { ok: Array.isArray(data) && data.length > 0 };
+  const row = Array.isArray(data) ? data[0] : null;
+  if (!row || !validJwk(row.host_keys?.sign) || !validJwk(row.host_keys?.dh)) return { ok: false };
+  return { ok: true, keys: { sign: row.host_keys.sign, dh: row.host_keys.dh } };
 }
 
-export async function createSession(quizId) {
+export async function createSession(quizId, publicKeys) {
   if (!UUID.test(quizId)) return { ok: false, error: 'Test invalid.' };
+  if (!validJwk(publicKeys?.sign) || !validJwk(publicKeys?.dh)) return { ok: false, error: 'Browserul nu a putut genera cheile jocului.' };
   const { supabase, user } = await requireUser();
   if (!user) return { ok: false, error: 'Sesiunea a expirat. Autentificați-vă din nou.' };
+  if (!(await allow(`session-user:${user.id}`, 30, 3600))) return { ok: false, error: 'Prea multe jocuri create într-o oră. Reîncercați mai târziu.' };
+  const hostKeys = {
+    sign: { kty: 'EC', crv: 'P-256', x: publicKeys.sign.x, y: publicKeys.sign.y },
+    dh: { kty: 'EC', crv: 'P-256', x: publicKeys.dh.x, y: publicKeys.dh.y },
+  };
   const { data: quiz } = await supabase.from('quizzes').select('id,title').eq('id', quizId).maybeSingle();
   if (!quiz) return { ok: false, error: 'Testul nu există sau nu este accesibil.' };
   const { data: questions } = await supabase
@@ -49,7 +61,7 @@ export async function createSession(quizId) {
     const pin = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
     const { data, error } = await supabase
       .from('game_sessions')
-      .insert({ quiz_id: quiz.id, host_id: user.id, pin, title: quiz.title, quiz_snapshot: playable })
+      .insert({ quiz_id: quiz.id, host_id: user.id, pin, title: quiz.title, quiz_snapshot: playable, host_keys: hostKeys })
       .select('id,pin')
       .single();
     if (!error) return { ok: true, id: data.id, pin: data.pin, questions: playable };
