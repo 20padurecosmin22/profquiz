@@ -265,11 +265,12 @@ table.matrix th:first-child { background: var(--surface); }
 .meter.mid span { background: linear-gradient(90deg, #B76E00, #E0A030); }
 .bar-row .pct { text-align: right; font-weight: 800; font-variant-numeric: tabular-nums; }
 
-.auth-wrap { min-height: 100vh; display: grid; grid-template-columns: 1fr 1fr; }
+.auth-wrap { height: 100vh; height: 100dvh; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
 .auth-side { background: var(--g-dark); color: #fff; padding: 48px; display: flex; flex-direction: column; justify-content: space-between; position: relative; overflow: hidden; }
 .auth-side h2 { font-size: clamp(2rem, 3.4vw, 3rem); max-width: 14ch; position: relative; z-index: 1; }
 .auth-side p { color: rgba(255,255,255,.75); max-width: 44ch; position: relative; z-index: 1; }
-.auth-form { display: grid; place-items: center; padding: 40px var(--gutter); }
+.auth-form { display: flex; height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain; padding: 40px var(--gutter); scrollbar-gutter: stable; }
+.auth-form > * { margin: auto; }
 .auth-card { width: min(440px, 100%); }
 .auth-card h1 { font-size: 2rem; }
 .tabs { display: inline-flex; background: #ECEAF5; border-radius: 999px; padding: 4px; margin-bottom: 24px; }
